@@ -4,25 +4,125 @@ import (
 	"log"
 	"math/rand"
 	"reflect"
-	"runtime"
 	"testing/quick"
 	"time"
 )
 
-// Add:pre -> len(s.elements) < s.size
-// Add:post -> true
-// Add:transform -> s.elements << x
+type Transition struct {
+	to      string
+	methods []string
+}
 
-// Get:pre -> len(s.elements) > 0
-// Get:post -> res == s.elements[0]
-// Get:transform -> s.elements = s.elements[1:]
+type FSM struct {
+	rng         *rand.Rand
+	state       string
+	transitions map[string][]Transition
+}
 
-// Size:pre -> true
-// Size:post -> res == len(s.elements)
-// Size:transform -> nil
+func NewFSM(seed int64) *FSM {
+	return &FSM{
+		rng:         rand.New(rand.NewSource(seed)),
+		transitions: make(map[string][]Transition),
+	}
+}
 
-type Precondition func() bool
-type Postcondition func(input interface{}) bool
+func (fsm *FSM) Transition(from, to string, methods []string) {
+	fsm.transitions[from] = append(fsm.transitions[from], Transition{to, methods})
+}
+
+func (fsm *FSM) Run(v interface{}) {
+	rv := reflect.New(reflect.TypeOf(v))
+	if init := rv.MethodByName("Init"); init != (reflect.Value{}) {
+		init.Call([]reflect.Value{reflect.ValueOf(fsm.rng)})
+	}
+
+	for {
+		if len(fsm.transitions[fsm.state]) == 0 {
+			log.Println("dead end")
+			return
+		}
+
+		idx := fsm.rng.Intn(len(fsm.transitions[fsm.state]))
+		trans := fsm.transitions[fsm.state][idx]
+		idx = fsm.rng.Intn(len(trans.methods))
+		// TODO check that the name is valid
+		call := rv.MethodByName(trans.methods[idx] + "Call")
+		var args []interface{}
+		for i, n := 0, reflect.TypeOf(call.Interface()).NumIn(); i < n; i++ {
+			// TODO optimize reflection
+			v, ok := quick.Value(reflect.TypeOf(call.Interface()).In(i), fsm.rng)
+			if !ok {
+				panic("cannot generate value") // XXX
+			}
+			args = append(args, v.Interface())
+		}
+		pre := rv.MethodByName(trans.methods[idx] + "Pre")
+		if pre != (reflect.Value{}) {
+			// TODO guard against code having wrong types/arity/...
+			if !pre.Call([]reflect.Value{
+				reflect.ValueOf(fsm.state),
+				reflect.ValueOf(trans.to),
+				reflect.ValueOf(args),
+			})[0].Bool() {
+				//log.Println("pre-condition failed for", trans.methods[idx])
+				continue
+			}
+		}
+		rargs := make([]reflect.Value, 0, len(args))
+		for _, v := range args {
+			rargs = append(rargs, reflect.ValueOf(v))
+		}
+		log.Printf("calling %s(%v)", trans.methods[idx]+"Call", args)
+		ret := call.Call(rargs)
+		iret := make([]interface{}, 0, len(ret))
+		for _, v := range ret {
+			iret = append(iret, v.Interface())
+		}
+
+		post := rv.MethodByName(trans.methods[idx] + "Post")
+		if post != (reflect.Value{}) {
+
+			if !post.Call([]reflect.Value{
+				reflect.ValueOf(fsm.state),
+				reflect.ValueOf(trans.to),
+				reflect.ValueOf(args),
+				reflect.ValueOf(iret),
+			})[0].Bool() {
+				log.Printf("postcondition failed for %s = (%v)", trans.methods[idx], iret)
+				return
+			}
+		}
+
+		next := rv.MethodByName(trans.methods[idx] + "Next")
+		if next != (reflect.Value{}) {
+			next.Call(
+				[]reflect.Value{
+					reflect.ValueOf(fsm.state),
+					reflect.ValueOf(trans.to),
+					reflect.ValueOf(args),
+					reflect.ValueOf(iret),
+				})
+		}
+	}
+}
+
+/*
+$ go run quick.go
+2016/01/28 11:57:20 calling SizeCall([])
+2016/01/28 11:57:20 calling SizeCall([])
+2016/01/28 11:57:20 calling SizeCall([])
+2016/01/28 11:57:20 calling SizeCall([])
+2016/01/28 11:57:20 calling AddCall([-2194441888669636008])
+2016/01/28 11:57:20 calling GetCall([])
+2016/01/28 11:57:20 calling AddCall([-4414100994337315531])
+2016/01/28 11:57:20 calling GetCall([])
+2016/01/28 11:57:20 calling SizeCall([])
+2016/01/28 11:57:20 calling AddCall([4339827657622334614])
+2016/01/28 11:57:20 calling SizeCall([])
+2016/01/28 11:57:20 postcondition failed for Size = ([0])
+*/
+
+// The implementation of our buggy Queue that we want to test
 
 type Queue struct {
 	r, w     int
@@ -49,251 +149,65 @@ func abs(x int) int {
 }
 
 func (q *Queue) Size() int {
+	// this implementation is purposefully buggy.
 	return abs(q.w-q.r) % q.size
 }
 
-// func (q *Queue) Size() int {
-// 	return (q.w - q.r + q.size) % q.size
-// }
+// The model describing how a queue should work
 
-func (*Queue) Free() {}
-
-type State struct {
-	name string
-	// state -> list of fn
-	transitions map[string][]interface{}
-
-	Data interface{}
-}
-
-type Function struct {
-	Fn   interface{}
-	Pre  func(from, to string, data interface{}, args []interface{}) bool
-	Args func(from, to string, data interface{}) []interface{}
-	Next func(from, to string, data interface{}, args []interface{}, ret []interface{}) interface{}
-	Post func(from, to string, data interface{}, args []interface{}, ret []interface{}) bool
-}
-
-type state struct {
+type Model struct {
 	size     int
 	elements []int
 	queue    *Queue
 }
 
-type transition struct {
-	to    string
-	funcs []Function
-}
+func (m *Model) Init(rng *rand.Rand) {
+	// Init sets up the model at the start of a test run
 
-type FSM struct {
-	states []string // TODO probably not needed
-	// from+to -> funcs
-	transitions map[string][]transition
-	functions   []Function
-
-	state string
-	data  interface{}
-}
-
-func (fsm *FSM) State(state string) {
-	fsm.states = append(fsm.states, state)
-}
-
-func (fsm *FSM) InitialState(state string) {
-	fsm.state = state
-}
-
-func (fsm *FSM) InitialData(data interface{}) {
-	fsm.data = data
-}
-
-func (fsm *FSM) Transition(from, to string, funcs []Function) {
-	if fsm.transitions == nil {
-		fsm.transitions = make(map[string][]transition)
+	m.size = int(rng.Int31n(1 << 7))
+	m.size = 1 // XXX, makes testing the prototype easier
+	m.queue = &Queue{
+		size:     m.size,
+		elements: make([]int, m.size),
 	}
-	fsm.transitions[from] = append(fsm.transitions[from], transition{to, funcs})
 }
 
-func (fsm *FSM) Function(fn Function) {
-	fsm.functions = append(fsm.functions, fn)
+// Preconditions determine whether a function is allowed to be called
+// in the current state (as per the contract of the API)
+//
+// Calls are responsible for calling the function(s) under test
+//
+// Postconditions check if the function call's result matches the expected model
+//
+// Next updates the model
+
+func (m *Model) AddPre(from, to string, args []interface{}) bool { return m.size > len(m.elements) }
+func (m *Model) AddCall(v int)                                   { m.queue.Add(v) }
+func (m *Model) AddNext(from, to string, args []interface{}, ret []interface{}) {
+	m.elements = append(m.elements, args[0].(int))
 }
 
-func funcName(fn interface{}) string {
-	if fn == nil {
-		return "nil"
-	}
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+func (m *Model) GetPre(from, to string, args []interface{}) bool { return len(m.elements) > 0 }
+func (m *Model) GetCall() int                                    { return m.queue.Get() }
+func (m *Model) GetPost(from, to string, args []interface{}, ret []interface{}) bool {
+	return ret[0].(int) == m.elements[0]
 }
 
-func (fsm *FSM) Run() {
-	seed := time.Now().UnixNano()
-	//seed := int64(1453934094266043870)
-	//seed := int64(1453934777130601499)
-	rng := rand.New(rand.NewSource(seed))
-	log.Println("rand seed:", seed)
-	n := 0
-	for {
-		n++
-		if n > 10000 {
-			log.Println("giving up")
-			return
-		}
-		if len(fsm.transitions[fsm.state]) == 0 {
-			log.Println("dead end")
-			return
-		}
-		idx := rng.Intn(len(fsm.transitions[fsm.state]))
-		trans := fsm.transitions[fsm.state][idx]
-		idx = rng.Intn(len(trans.funcs))
-		fn := trans.funcs[idx]
-		// FIXME this is buggy. a function pointer might not identify a function uniquely
-
-		// TODO use Args
-		var args []reflect.Value
-		var argsi []interface{}
-		if fn.Fn != nil {
-			typ := reflect.TypeOf(fn.Fn)
-			num := typ.NumIn()
-			for i := 0; i < num; i++ {
-				v, ok := quick.Value(typ.In(i), rng)
-				if !ok {
-					panic("cannot generate value")
-				}
-				args = append(args, v)
-			}
-			argsi = make([]interface{}, 0, len(args))
-			for _, v := range args {
-				argsi = append(argsi, v.Interface())
-			}
-		}
-		if fn.Pre != nil {
-			if !fn.Pre(fsm.state, trans.to, fsm.data, argsi) {
-				// FIXME
-				log.Println("skipping", funcName(fn.Fn))
-				continue
-			}
-		}
-
-		log.Println("calling", funcName(fn.Fn), argsi)
-		var ret []reflect.Value
-		var reti []interface{}
-		if fn.Fn != nil {
-			ret = reflect.ValueOf(fn.Fn).Call(args)
-			reti = make([]interface{}, 0, len(ret))
-		}
-		for _, v := range ret {
-			reti = append(reti, v.Interface())
-		}
-		if fn.Post != nil {
-			if !fn.Post(fsm.state, trans.to, fsm.data, []interface{}{0}, reti) {
-				log.Fatal("post condition failed")
-			}
-		}
-		if fn.Next != nil {
-			fsm.data = fn.Next(fsm.state, trans.to, fsm.data, argsi, reti)
-		}
-		fsm.state = trans.to
-	}
+func (m *Model) GetNext(from, to string, args []interface{}, ret []interface{}) {
+	// XXX this leaks memory, fix later
+	m.elements = m.elements[1:]
+}
+func (m *Model) SizeCall() int { return m.queue.Size() }
+func (m *Model) SizePost(from, to string, args []interface{}, ret []interface{}) bool {
+	return ret[0].(int) == len(m.elements)
 }
 
 func main() {
-	// TODO this should reuse the same rng as the rest
-	rand.Seed(time.Now().Unix())
-	var n uint8
-	for n == 0 {
-		n = uint8(rand.Int31())
-	}
-	log.Println("n:", n)
-	q := &Queue{size: int(n) + 1, elements: make([]int, int(n)+1)}
-
-	fsm := FSM{}
-	//fsm.State("new")
-	fsm.State("initialised")
-	//fsm.State("destroyed")
-	//fsm.InitialState("new")
-	fsm.InitialState("initialised")
-	fsm.InitialData(state{size: int(n)})
-
-	add := Function{
-		q.Add,
-		func(from, to string, data interface{}, args []interface{}) bool {
-			return data.(state).size > len(data.(state).elements)
-		},
-		nil,
-		func(from, to string, data interface{}, args []interface{}, ret []interface{}) interface{} {
-			s := data.(state)
-			els := make([]int, len(s.elements))
-			copy(els, s.elements)
-			els = append(els, args[0].(int))
-			s.elements = els
-			return s
-		},
-		nil,
-	}
-	fsm.Function(add)
-
-	get := Function{
-		q.Get,
-		func(from, to string, data interface{}, args []interface{}) bool {
-			return len(data.(state).elements) > 0
-		},
-		nil,
-		func(from, to string, data interface{}, args []interface{}, ret []interface{}) interface{} {
-			s := data.(state)
-			s.elements = s.elements[1:]
-			return s
-		},
-		func(from, to string, data interface{}, args []interface{}, ret []interface{}) bool {
-			v := ret[0].(int) == data.(state).elements[0]
-			if !v {
-				log.Printf("got element %d, want %d", ret[0].(int), data.(state).elements[0])
-			}
-			return v
-		},
-	}
-	fsm.Function(get)
-
-	size := Function{
-		q.Size,
-		nil,
-		nil,
-		nil,
-		func(from, to string, data interface{}, args []interface{}, ret []interface{}) bool {
-			// TODO testing-like interface
-			v := ret[0].(int) == len(data.(state).elements)
-			if !v {
-				log.Printf("got size %d, want %d", ret[0].(int), len(data.(state).elements))
-			}
-			return v
-		},
-	}
-	fsm.Function(size)
-
-	free := Function{
-		q.Free,
-		nil,
-		nil,
-		nil,
-		nil,
-	}
-	fsm.Function(free)
-
-	// init := Function{
-	// 	nil, nil, nil,
-	// 	func(from, to string, data interface{}, args []interface{}, ret []interface{}) interface{} {
-	// 		v := data.(state)
-	// 		// TODO this should reuse the same rng as the rest
-	// 		n := uint8(rand.Int31())
-	// 		v.queue = &Queue{size: int(n), elements: make([]int, int(n))}
-	// 		v.size = int(n)
-	// 		return v
-	// 	},
-	// 	nil,
-	// }
-
-	//fsm.Transition("new", "initialised", []Function{init})
-	fsm.Transition("initialised", "initialised", []Function{add, get, size})
-	//fsm.Transition("initialised", "destroyed", []Function{free})
-
-	fsm.Run()
+	seed := time.Now().UnixNano()
+	fsm := NewFSM(seed)
+	// Our queue has a single state, in which all its methods can be
+	// called repeatedly in any order
+	fsm.Transition("state1", "state1", []string{"Add", "Get", "Size"})
+	fsm.state = "state1" // XXX set the initial state. we'll want an API on FSM2 for that.
+	fsm.Run(Model{})
 }
