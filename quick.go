@@ -30,6 +30,14 @@ func (fsm *FSM) Transition(from, to string, methods []string) {
 	fsm.transitions[from] = append(fsm.transitions[from], Transition{to, methods})
 }
 
+func funcall(m reflect.Value, args []reflect.Value) (v []reflect.Value, panicked interface{}) {
+	defer func() {
+		panicked = recover()
+	}()
+	ret := m.Call(args)
+	return ret, nil
+}
+
 func (fsm *FSM) Run(v interface{}) {
 	rv := reflect.New(reflect.TypeOf(v))
 	if init := rv.MethodByName("Init"); init != (reflect.Value{}) {
@@ -73,10 +81,19 @@ func (fsm *FSM) Run(v interface{}) {
 			rargs = append(rargs, reflect.ValueOf(v))
 		}
 		log.Printf("calling %s(%v)", trans.methods[idx]+"Call", args)
-		ret := call.Call(rargs)
+		defer func() {
+			if e := recover(); e != nil {
+				log.Println("panic", e)
+			}
+		}()
+		ret, panicked := funcall(call, rargs)
 		iret := make([]interface{}, 0, len(ret))
 		for _, v := range ret {
 			iret = append(iret, v.Interface())
+		}
+		if panicked != nil {
+			log.Printf("postcondition failed for %s = (%v): got panic %v", trans.methods[idx], iret, panicked)
+			return
 		}
 
 		post := rv.MethodByName(trans.methods[idx] + "Post")
