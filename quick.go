@@ -204,16 +204,16 @@ func (fsm *FSM) Run(v interface{}) []Step {
 	}
 }
 
-func minimizeFunc(fsm *FSM, model interface{}) func(d []Step) Result {
-	return func(d []Step) Result {
+func minimizeFunc(fsm *FSM, model interface{}) func(d []Step) result {
+	return func(d []Step) result {
 		valid, fail := fsm.Replay(d, model)
 		if !valid {
-			return Unresolved
+			return ddUnresolved
 		}
 		if fail {
-			return Fail
+			return ddFail
 		}
-		return Pass
+		return ddPass
 	}
 }
 

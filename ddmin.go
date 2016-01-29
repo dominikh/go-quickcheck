@@ -9,33 +9,33 @@ Andreas Zeller (2002)
 */
 package quickcheck
 
-type Result int
+type result int
 
 const (
 	// Pass indicates the test passed
-	Pass Result = iota
+	ddPass result = iota
 	// Fail indicates the expected test failure was produced
-	Fail
+	ddFail
 	// Unresolved indicates the test failed for a different reason
-	Unresolved
+	ddUnresolved
 )
 
 // looks to minimize data so that f will fail
-func minimize(data []Step, f func(d []Step) Result) []Step {
+func minimize(data []Step, f func(d []Step) result) []Step {
 
-	if f(nil) == Fail {
+	if f(nil) == ddFail {
 		// that was easy..
 		return nil
 	}
 
-	if f(data) == Pass {
+	if f(data) == ddPass {
 		panic("ddmin: function must fail on data")
 	}
 
 	return ddmin(data, f, 2)
 }
 
-func ddmin(data []Step, f func(d []Step) Result, granularity int) []Step {
+func ddmin(data []Step, f func(d []Step) result, granularity int) []Step {
 
 mainloop:
 	for len(data) >= 2 {
@@ -43,7 +43,7 @@ mainloop:
 		subsets := makeSubsets(data, granularity)
 
 		for _, subset := range subsets {
-			if f(subset) == Fail {
+			if f(subset) == ddFail {
 				// fake tail recursion
 				data = subset
 				granularity = 2
@@ -54,7 +54,7 @@ mainloop:
 		b := make([]Step, len(data))
 		for i := range subsets {
 			complement := makeComplement(subsets, i, b[:0])
-			if f(complement) == Fail {
+			if f(complement) == ddFail {
 				granularity--
 				if granularity < 2 {
 					granularity = 2
