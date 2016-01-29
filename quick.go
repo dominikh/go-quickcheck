@@ -1,12 +1,10 @@
-package main
+package quickcheck
 
 import (
-	"fmt"
 	"log"
 	"math/rand"
 	"reflect"
 	"testing/quick"
-	"time"
 )
 
 type Transition struct {
@@ -28,13 +26,10 @@ type Step struct {
 	Args     []interface{}
 }
 
-func formatStep(s Step) string {
-	return fmt.Sprintf("%s(%v)", s.Method, s.Args)
-}
-
 func NewFSM(seed int64) *FSM {
 	return &FSM{
 		seed:        seed,
+		state:       "state0", // FIXME do not hardcode name of initial state
 		transitions: make(map[string][]Transition),
 	}
 }
@@ -161,6 +156,11 @@ func (fsm *FSM) init(rv reflect.Value) {
 }
 
 func (fsm *FSM) Run(v interface{}) []Step {
+	// FIXME Right now, Run will only return once it has encountered a
+	// failure
+	//
+	// FIXME Run only makes one (infinitely long) attempt at
+	// triggering a failure.
 	var out []Step
 
 	rv := reflect.New(reflect.TypeOf(v))
@@ -204,111 +204,9 @@ func (fsm *FSM) Run(v interface{}) []Step {
 	}
 }
 
-// The implementation of our buggy Queue that we want to test
-
-type Queue struct {
-	r, w     int
-	size     int
-	elements []int
-}
-
-func (q *Queue) Add(v int) {
-	q.elements[q.w] = v
-	q.w = (q.w + 1) % q.size
-}
-
-func (q *Queue) Get() int {
-	v := q.elements[q.r]
-	q.r = (q.r + 1) % q.size
-	return v
-}
-
-func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
-}
-
-func (q *Queue) Size() int {
-	// this implementation is purposefully buggy.
-	return abs(q.w-q.r) % q.size
-}
-
-// The model describing how a queue should work
-
-type Model struct {
-	size     int
-	elements []int
-	queue    *Queue
-}
-
-// Preconditions determine whether a function is allowed to be called
-// in the current state (as per the contract of the API)
-//
-// Calls are responsible for calling the function(s) under test
-//
-// Postconditions check if the function call's result matches the expected model
-//
-// Next updates the model
-
-func (m *Model) InitCall(size uint8) {
-	// Init sets up the model at the start of a test run
-
-	m.size = int(size)
-	// m.size = 1 // XXX, makes testing the prototype easier
-	m.queue = &Queue{
-		size:     m.size + 1,
-		elements: make([]int, m.size+1),
-	}
-}
-
-func (m *Model) AddPre(from, to string, args []interface{}) bool { return m.size > len(m.elements) }
-func (m *Model) AddCall(v int)                                   { m.queue.Add(v) }
-func (m *Model) AddNext(from, to string, args []interface{}, ret []interface{}) {
-	m.elements = append(m.elements, args[0].(int))
-}
-
-func (m *Model) GetPre(from, to string, args []interface{}) bool { return len(m.elements) > 0 }
-func (m *Model) GetCall() int                                    { return m.queue.Get() }
-func (m *Model) GetPost(from, to string, args []interface{}, ret []interface{}) bool {
-	return ret[0].(int) == m.elements[0]
-}
-func (m *Model) GetNext(from, to string, args []interface{}, ret []interface{}) {
-	// XXX this leaks memory, fix later
-	m.elements = m.elements[1:]
-}
-
-func (m *Model) SizeCall() int { return m.queue.Size() }
-func (m *Model) SizePost(from, to string, args []interface{}, ret []interface{}) bool {
-	return ret[0].(int) == len(m.elements)
-}
-
-func logSteps(ss []Step) {
-	for _, s := range ss {
-		log.Println("\t" + formatStep(s))
-	}
-}
-
-func main() {
-	seed := time.Now().UnixNano()
-	// seed = 1453987917457171993
-	// seed = 1454013752742354501
-	log.Println("seed:", seed)
-	fsm := NewFSM(seed)
-	// Our queue has a single state, in which all its methods can be
-	// called repeatedly in any order
-	fsm.Transition("state0", "state1", []string{"Init"})
-	fsm.Transition("state1", "state1", []string{"Add", "Get", "Size"})
-	fsm.state = "state0" // XXX set the initial state. we'll want an API on FSM2 for that.
-
-	steps := fsm.Run(Model{})
-
-	log.Println("Failure:")
-	logSteps(steps)
-
-	f := func(d []Step) Result {
-		valid, fail := fsm.Replay(d, Model{})
+func minimizeFunc(fsm *FSM, model interface{}) func(d []Step) Result {
+	return func(d []Step) Result {
+		valid, fail := fsm.Replay(d, model)
 		if !valid {
 			return Unresolved
 		}
@@ -317,7 +215,8 @@ func main() {
 		}
 		return Pass
 	}
-	minimized := Minimize(steps, f)
-	log.Println("Minimized to:")
-	logSteps(minimized)
+}
+
+func (fsm *FSM) Minimize(steps []Step, model interface{}) []Step {
+	return minimize(steps, minimizeFunc(fsm, model))
 }

@@ -7,7 +7,7 @@ Andreas Zeller (2002)
     https://www.st.cs.uni-saarland.de/papers/tse2002/tse2002.pdf
 
 */
-package main
+package quickcheck
 
 type Result int
 
@@ -21,7 +21,7 @@ const (
 )
 
 // looks to minimize data so that f will fail
-func Minimize(data []Step, f func(d []Step) Result) []Step {
+func minimize(data []Step, f func(d []Step) Result) []Step {
 
 	if f(nil) == Fail {
 		// that was easy..
