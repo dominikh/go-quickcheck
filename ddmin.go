@@ -21,29 +21,30 @@ const (
 )
 
 // looks to minimize data so that f will fail
-func minimize(data []Step, f func(d []Step) result) []Step {
+func minimize(data []Step, f func(d []Step) ([]Result, result)) []Result {
 
-	if f(nil) == ddFail {
+	if ret, res := f(nil); res == ddFail {
 		// that was easy..
-		return nil
+		return ret
 	}
 
-	if f(data) == ddPass {
+	if _, res := f(data); res == ddPass {
 		panic("ddmin: function must fail on data")
 	}
 
 	return ddmin(data, f, 2)
 }
 
-func ddmin(data []Step, f func(d []Step) result, granularity int) []Step {
-
+func ddmin(data []Step, f func(d []Step) ([]Result, result), granularity int) []Result {
+	var res []Result
+	var ret result
 mainloop:
-	for len(data) >= 2 {
+	for len(data) >= 1 {
 
 		subsets := makeSubsets(data, granularity)
 
 		for _, subset := range subsets {
-			if f(subset) == ddFail {
+			if res, ret = f(subset); ret == ddFail {
 				// fake tail recursion
 				data = subset
 				granularity = 2
@@ -54,7 +55,7 @@ mainloop:
 		b := make([]Step, len(data))
 		for i := range subsets {
 			complement := makeComplement(subsets, i, b[:0])
-			if f(complement) == ddFail {
+			if res, ret = f(complement); ret == ddFail {
 				granularity--
 				if granularity < 2 {
 					granularity = 2
@@ -66,7 +67,8 @@ mainloop:
 		}
 
 		if granularity == len(data) {
-			return data
+			res, _ = f(data)
+			return res
 		}
 
 		granularity *= 2
@@ -76,7 +78,7 @@ mainloop:
 		}
 	}
 
-	return data
+	return res
 }
 
 func makeSubsets(data []Step, granularity int) [][]Step {

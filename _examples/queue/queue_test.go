@@ -29,8 +29,8 @@ type Model struct {
 func (m *Model) InitCall(size uint8) {
 	// Init sets up the model at the start of a test run
 
-	m.size = int(size % 16)
-	m.size = 1 // XXX, makes testing the prototype easier
+	m.size = int(size%4) + 1
+	//m.size = 1 // XXX, makes testing the prototype easier
 	m.queue = New(m.size)
 }
 
@@ -55,16 +55,19 @@ func (m *Model) SizePost(from, to string, args []interface{}, ret []interface{})
 	return ret[0].(int) == len(m.elements)
 }
 
-func logSteps(t *testing.T, ss []quickcheck.Step) {
+func logResults(t *testing.T, rs []quickcheck.Result) {
 	// TODO this functionality should be in the quickcheck package
-	for _, s := range ss {
-		t.Log("\t" + formatStep(s))
+	for _, r := range rs {
+		t.Log("\t" + formatResult(r))
 	}
 }
 
-func formatStep(s quickcheck.Step) string {
+func formatResult(r quickcheck.Result) string {
 	// TODO this functionality should be in the quickcheck package
-	return fmt.Sprintf("%s(%v)", s.Method, s.Args)
+	if len(r.Ret) > 0 {
+		return fmt.Sprintf("%s(%v) = (%v)", r.Step.Method, r.Step.Args, r.Ret)
+	}
+	return fmt.Sprintf("%s(%v)", r.Step.Method, r.Step.Args)
 }
 
 func TestQueue(t *testing.T) {
@@ -75,13 +78,13 @@ func TestQueue(t *testing.T) {
 	fsm.Transition("state0", "state1", []string{"Init"})
 	fsm.Transition("state1", "state1", []string{"Add", "Get", "Size"})
 
-	steps := fsm.Run(Model{})
+	results := fsm.Run(Model{})
 	// TODO quickcheck should minimize for us
 	// TODO quickcheck should give up if it cannot find a bug
 	t.Log("Call chain:")
-	logSteps(t, steps)
-	steps = fsm.Minimize(steps, Model{})
+	logResults(t, results)
+	results = fsm.Minimize(results, Model{})
 	t.Log("Minimized call chain:")
-	logSteps(t, steps)
+	logResults(t, results)
 	t.Fail()
 }

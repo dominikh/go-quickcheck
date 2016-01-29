@@ -26,6 +26,14 @@ type Step struct {
 	Args     []interface{}
 }
 
+type Result struct {
+	Step     Step
+	Invalid  bool
+	PreFail  bool
+	PostFail bool
+	Ret      []interface{}
+}
+
 func NewFSM(seed int64) *FSM {
 	return &FSM{
 		seed:        seed,
@@ -39,17 +47,18 @@ func (fsm *FSM) Transition(from, to string, methods []string) {
 }
 
 func funcall(m reflect.Value, args []reflect.Value) (v []reflect.Value, panicked interface{}) {
-	defer func() {
-		panicked = recover()
-	}()
+	// defer func() {
+	// 	panicked = recover()
+	// }()
 	ret := m.Call(args)
 	return ret, nil
 }
 
-func (fsm *FSM) step(s Step, rv reflect.Value) (valid bool, prefail bool, callfail bool) {
+//func (fsm *FSM) step(s Step, rv reflect.Value) (valid bool, prefail bool, callfail bool) {
+func (fsm *FSM) step(s Step, rv reflect.Value) Result {
 	// TODO don't verify step if we just generated it
 	if s.State != fsm.state {
-		return false, false, false
+		return Result{Step: s, Invalid: true}
 	}
 	found := false
 outer:
@@ -65,7 +74,7 @@ outer:
 		}
 	}
 	if !found {
-		return false, false, false
+		return Result{Step: s, Invalid: true}
 	}
 
 	call := rv.MethodByName(s.Method + "Call")
@@ -78,7 +87,7 @@ outer:
 			reflect.ValueOf(s.Args),
 		})[0].Bool() {
 			//log.Println("pre-condition failed for", s.Method)
-			return false, true, false
+			return Result{Step: s, PreFail: true}
 		}
 	}
 	rargs := make([]reflect.Value, 0, len(s.Args))
@@ -86,11 +95,6 @@ outer:
 		rargs = append(rargs, reflect.ValueOf(v))
 	}
 	//log.Printf("calling %s(%v)", s.Method+"Call", s.Args)
-	defer func() {
-		if e := recover(); e != nil {
-			log.Println("panic", e)
-		}
-	}()
 	ret, panicked := funcall(call, rargs)
 	iret := make([]interface{}, 0, len(ret))
 	for _, v := range ret {
@@ -98,7 +102,7 @@ outer:
 	}
 	if panicked != nil {
 		log.Printf("postcondition failed for %s = (%v): got panic %v", s.Method, iret, panicked)
-		return true, false, true
+		return Result{Step: s, PostFail: true, Ret: iret}
 	}
 
 	post := rv.MethodByName(s.Method + "Post")
@@ -111,7 +115,7 @@ outer:
 			reflect.ValueOf(iret),
 		})[0].Bool() {
 			//log.Printf("postcondition failed for %s = (%v)", s.Method, iret)
-			return true, false, true
+			return Result{Step: s, PostFail: true, Ret: iret}
 		}
 	}
 
@@ -127,27 +131,26 @@ outer:
 	}
 
 	fsm.state = s.NewState
-	return true, false, false
+	return Result{Step: s, Ret: iret}
 }
 
-func (fsm *FSM) Replay(ss []Step, model interface{}) (valid, fail bool) {
+func (fsm *FSM) Replay(ss []Step, model interface{}) (results []Result, valid, fail bool) {
 	rv := reflect.New(reflect.TypeOf(model))
 	fsm.init(rv)
 	for _, s := range ss {
-		valid, prefail, callfail := fsm.step(s, rv)
-		if !valid {
-			return false, false
+		res := fsm.step(s, rv)
+		results = append(results, res)
+		if res.Invalid {
+			return results, false, false
 		}
-		if prefail {
-			// FIXME is this code dead?
-			log.Println("precondition failed unexpectedly")
-			return false, false
+		if res.PreFail {
+			return results, false, false
 		}
-		if callfail {
-			return true, true
+		if res.PostFail {
+			return results, true, true
 		}
 	}
-	return true, false
+	return results, true, false
 }
 
 func (fsm *FSM) init(rv reflect.Value) {
@@ -155,13 +158,13 @@ func (fsm *FSM) init(rv reflect.Value) {
 	fsm.rng = rand.New(rand.NewSource(fsm.seed)) // XXX we shouldn't need the rng in Replay
 }
 
-func (fsm *FSM) Run(v interface{}) []Step {
+func (fsm *FSM) Run(v interface{}) []Result {
 	// FIXME Right now, Run will only return once it has encountered a
 	// failure
 	//
 	// FIXME Run only makes one (infinitely long) attempt at
 	// triggering a failure.
-	var out []Step
+	var out []Result
 
 	rv := reflect.New(reflect.TypeOf(v))
 	fsm.init(rv)
@@ -193,30 +196,35 @@ func (fsm *FSM) Run(v interface{}) []Step {
 			step.Args = append(step.Args, v.Interface())
 		}
 
-		_, prefail, callfail := fsm.step(step, rv)
-		if prefail {
+		res := fsm.step(step, rv)
+		if res.PreFail {
 			continue
 		}
-		out = append(out, step)
-		if callfail {
+		out = append(out, res)
+		if res.PostFail {
 			return out
 		}
 	}
 }
 
-func minimizeFunc(fsm *FSM, model interface{}) func(d []Step) result {
-	return func(d []Step) result {
-		valid, fail := fsm.Replay(d, model)
+func minimizeFunc(fsm *FSM, model interface{}) func(d []Step) ([]Result, result) {
+	return func(d []Step) ([]Result, result) {
+		res, valid, fail := fsm.Replay(d, model)
 		if !valid {
-			return ddUnresolved
+			return res, ddUnresolved
 		}
 		if fail {
-			return ddFail
+			log.Println("fail")
+			return res, ddFail
 		}
-		return ddPass
+		return res, ddPass
 	}
 }
 
-func (fsm *FSM) Minimize(steps []Step, model interface{}) []Step {
+func (fsm *FSM) Minimize(res []Result, model interface{}) []Result {
+	steps := make([]Step, len(res))
+	for i, v := range res {
+		steps[i] = v.Step
+	}
 	return minimize(steps, minimizeFunc(fsm, model))
 }
